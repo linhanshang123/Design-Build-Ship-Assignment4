@@ -252,7 +252,21 @@ export default function Dashboard() {
     return groupReadings(searchResults.map((result) => result.reading));
   }, [searchResults]);
 
-  const activeMapStations = isSearchMode ? searchStations : visibleMapStations;
+  const searchMapStations = useMemo(() => {
+    const stationMap = new Map<number, Station>();
+
+    for (const station of searchStations) {
+      stationMap.set(station.openaq_location_id, station);
+    }
+
+    for (const station of followedStations) {
+      stationMap.set(station.openaq_location_id, station);
+    }
+
+    return Array.from(stationMap.values());
+  }, [followedStations, searchStations]);
+
+  const activeMapStations = isSearchMode ? searchMapStations : visibleMapStations;
   const activeReadingsByStation = isSearchMode
     ? searchReadingsByStation
     : readingsByStation;
@@ -268,7 +282,7 @@ export default function Dashboard() {
   const currentSearchRegionFollowed =
     canFollowCurrentSearch && followedRegionKeys.has(currentSearchRegionKey);
   const mapKey = isSearchMode
-    ? `search-${normalizedQuery.toLowerCase()}-${searchStations
+    ? `search-${normalizedQuery.toLowerCase()}-${activeMapStations
         .map((station) => station.openaq_location_id)
         .join("-")}`
     : `region-${selectedRegion}`;
