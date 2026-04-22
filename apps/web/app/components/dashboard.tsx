@@ -863,11 +863,11 @@ export default function Dashboard() {
           />
           <MetricCard
             icon={<MapPin className="h-4 w-4" />}
-            label={isSearchMode ? "Search Stations" : `${activeRegion.shortLabel} Stations`}
+            label={isSearchMode ? `${currentSearchRegionLabel} Stations` : `${activeRegion.shortLabel} Stations`}
             value={
               isSearchMode
                 ? searchResults.length.toString()
-                : regionStations.length.toString()
+                : visibleMapStations.length.toString()
             }
           />
           <MetricCard
