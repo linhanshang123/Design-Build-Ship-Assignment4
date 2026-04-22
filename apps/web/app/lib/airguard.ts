@@ -51,6 +51,17 @@ export type UserRegionPreference = {
   updated_at: string;
 };
 
+export type UserRegionFollow = {
+  id: string;
+  clerk_user_id: string;
+  region_key: string;
+  label: string;
+  center_lat: number;
+  center_lng: number;
+  zoom: number;
+  created_at: string;
+};
+
 export type WorkerRun = {
   id: string;
   started_at: string;
@@ -83,34 +94,6 @@ export const AIRGUARD_REGIONS: AirGuardRegion[] = [
     center: [41.8781, -87.6298],
     zoom: 9,
   },
-  {
-    key: "new_york",
-    label: "New York Metro",
-    shortLabel: "New York",
-    center: [40.7128, -74.006],
-    zoom: 9,
-  },
-  {
-    key: "los_angeles",
-    label: "Los Angeles Basin",
-    shortLabel: "Los Angeles",
-    center: [34.0522, -118.2437],
-    zoom: 9,
-  },
-  {
-    key: "bay_area",
-    label: "Bay Area",
-    shortLabel: "Bay Area",
-    center: [37.7749, -122.4194],
-    zoom: 9,
-  },
-  {
-    key: "houston",
-    label: "Houston Metro",
-    shortLabel: "Houston",
-    center: [29.7604, -95.3698],
-    zoom: 9,
-  },
 ];
 
 export const DEFAULT_REGION_KEY = "chicago";
@@ -132,11 +115,10 @@ export const POLLUTANT_LABELS: Record<string, string> = {
 };
 
 export const DEFAULT_THRESHOLDS: Record<string, number> = {
-  pm25: 35,
-  pm10: 100,
-  o3: 0.07,
-  no2: 100,
+  pm25: 100,
 };
+
+export const FRESH_READING_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 export function createAirGuardClient(
   getToken?: () => Promise<string | null>,
@@ -162,13 +144,31 @@ export function readingScore(reading: StationReading | null) {
   return reading.aqi_estimate ?? reading.value;
 }
 
+export function isFreshReading(
+  reading: StationReading | null,
+  nowMs = Date.now(),
+) {
+  if (!reading) return false;
+
+  const measuredAt = new Date(reading.measured_at).getTime();
+  return Number.isFinite(measuredAt) && nowMs - measuredAt <= FRESH_READING_WINDOW_MS;
+}
+
+export function isFreshPm25Reading(
+  reading: StationReading | null,
+  nowMs = Date.now(),
+) {
+  return (
+    reading?.pollutant === "pm25" &&
+    reading.aqi_estimate !== null &&
+    isFreshReading(reading, nowMs)
+  );
+}
+
 export function getPrimaryReading(readings: StationReading[]) {
   if (readings.length === 0) return null;
 
-  const pm25 = readings.find((reading) => reading.pollutant === "pm25");
-  if (pm25) return pm25;
-
-  return [...readings].sort((a, b) => readingScore(b) - readingScore(a))[0];
+  return readings.find((reading) => isFreshPm25Reading(reading)) ?? null;
 }
 
 export function getAqiColor(category: string | null | undefined) {
@@ -197,11 +197,7 @@ export function formatReadingValue(reading: StationReading | null) {
     return reading.value.toFixed(3);
   }
 
-  if (Math.abs(reading.value) < 10) {
-    return reading.value.toFixed(1);
-  }
-
-  return Math.round(reading.value).toString();
+  return reading.value.toFixed(1);
 }
 
 export function formatMeasuredAt(value: string | null | undefined) {
@@ -219,6 +215,10 @@ export function thresholdFor(
   pollutant: string,
   thresholds: UserThreshold[],
 ) {
+  if (!(pollutant in DEFAULT_THRESHOLDS)) {
+    return null;
+  }
+
   const saved = thresholds.find(
     (threshold) => threshold.pollutant === pollutant && threshold.enabled,
   );
@@ -233,5 +233,6 @@ export function isOverThreshold(
   if (!reading) return false;
 
   const threshold = thresholdFor(reading.pollutant, thresholds);
-  return threshold !== null && reading.value >= threshold;
+  const score = reading.aqi_estimate ?? reading.value;
+  return threshold !== null && score >= threshold;
 }

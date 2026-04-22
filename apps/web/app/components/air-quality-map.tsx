@@ -3,17 +3,19 @@
 import L from "leaflet";
 import { useEffect } from "react";
 import { MapContainer, Marker, TileLayer, useMap } from "react-leaflet";
-import type { Station, StationReading } from "../lib/airguard";
+import type { Station, StationReading, UserThreshold } from "../lib/airguard";
 import {
   formatReadingValue,
   getAqiColor,
   getPrimaryReading,
+  isOverThreshold,
 } from "../lib/airguard";
 
 type AirQualityMapProps = {
   stations: Station[];
   readingsByStation: Map<number, StationReading[]>;
   followedStationIds: Set<number>;
+  thresholds: UserThreshold[];
   selectedStationId: number | null;
   center: [number, number];
   zoom: number;
@@ -41,10 +43,12 @@ function SelectedStationFlyTo({
 
 function createStationIcon({
   reading,
+  alert,
   isFollowed,
   isSelected,
 }: {
   reading: StationReading | null;
+  alert: boolean;
   isFollowed: boolean;
   isSelected: boolean;
 }) {
@@ -56,10 +60,11 @@ function createStationIcon({
     className: "airguard-marker",
     html: `
       <div
-        class="airguard-marker-core ${isSelected ? "is-selected" : ""} ${isFollowed ? "is-followed" : ""}"
+        class="airguard-marker-core ${isSelected ? "is-selected" : ""} ${isFollowed ? "is-followed" : ""} ${alert ? "is-alert" : ""}"
         style="--marker-color:${color}; width:${size}px; height:${size}px;"
       >
         <span>${value}</span>
+        ${alert ? '<span class="airguard-marker-alert">!</span>' : ""}
       </div>
     `,
     iconSize: [size, size],
@@ -71,6 +76,7 @@ export default function AirQualityMap({
   stations,
   readingsByStation,
   followedStationIds,
+  thresholds,
   selectedStationId,
   center,
   zoom,
@@ -100,8 +106,11 @@ export default function AirQualityMap({
       {stations.map((station) => {
         const readings = readingsByStation.get(station.openaq_location_id) || [];
         const primaryReading = getPrimaryReading(readings);
+        if (!primaryReading) return null;
+
         const isFollowed = followedStationIds.has(station.openaq_location_id);
         const isSelected = selectedStationId === station.openaq_location_id;
+        const alert = isOverThreshold(primaryReading, thresholds);
 
         return (
           <Marker
@@ -109,10 +118,11 @@ export default function AirQualityMap({
             position={[station.latitude, station.longitude]}
             icon={createStationIcon({
               reading: primaryReading,
+              alert,
               isFollowed,
               isSelected,
             })}
-            title={station.name}
+            title={`${station.name} - PM2.5 AQI ${primaryReading.aqi_estimate}`}
             eventHandlers={{
               click: () => onSelectStation(station.openaq_location_id),
             }}

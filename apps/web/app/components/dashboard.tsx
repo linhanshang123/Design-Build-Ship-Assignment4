@@ -19,15 +19,16 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type {
+  AirGuardRegion,
   Station,
   StationReading,
+  UserRegionFollow,
   UserRegionPreference,
   UserStationFollow,
   UserThreshold,
   WorkerRun,
 } from "../lib/airguard";
 import {
-  AIRGUARD_REGIONS,
   DEFAULT_THRESHOLDS,
   DEFAULT_REGION_KEY,
   formatMeasuredAt,
@@ -53,6 +54,49 @@ const AirQualityMap = dynamic(() => import("./air-quality-map"), {
 
 type LoadState = "idle" | "loading" | "ready" | "error";
 
+type StationSearchResult = {
+  station: Station;
+  reading: StationReading;
+  source: "local" | "openaq";
+  distanceMeters: number | null;
+};
+
+function titleCaseSearch(value: string) {
+  return value
+    .trim()
+    .split(/\s+/)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function searchRegionKey(value: string) {
+  const slug = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return slug ? `search:${slug}` : "";
+}
+
+function isVisibleRegionFollow(follow: UserRegionFollow) {
+  return follow.region_key === DEFAULT_REGION_KEY || follow.region_key.startsWith("search:");
+}
+
+function regionFromFollow(follow: UserRegionFollow): AirGuardRegion {
+  if (follow.region_key === DEFAULT_REGION_KEY) {
+    return getRegionConfig(DEFAULT_REGION_KEY);
+  }
+
+  return {
+    key: follow.region_key,
+    label: follow.label,
+    shortLabel: follow.label,
+    center: [follow.center_lat, follow.center_lng],
+    zoom: follow.zoom,
+  };
+}
+
 function groupReadings(readings: StationReading[]) {
   const map = new Map<number, StationReading[]>();
 
@@ -76,6 +120,25 @@ function sortStationsByReading(
   });
 }
 
+function averageCenter(stations: Station[]): [number, number] | null {
+  if (stations.length === 0) return null;
+
+  const totals = stations.reduce(
+    (current, station) => {
+      return {
+        latitude: current.latitude + station.latitude,
+        longitude: current.longitude + station.longitude,
+      };
+    },
+    { latitude: 0, longitude: 0 },
+  );
+
+  return [
+    totals.latitude / stations.length,
+    totals.longitude / stations.length,
+  ];
+}
+
 function getStatusCopy(run: WorkerRun | null) {
   if (!run) return "Waiting for first worker run";
   if (run.status === "ok") return `Live ${formatMeasuredAt(run.finished_at)}`;
@@ -93,14 +156,20 @@ export default function Dashboard() {
   const [stations, setStations] = useState<Station[]>([]);
   const [readings, setReadings] = useState<StationReading[]>([]);
   const [follows, setFollows] = useState<UserStationFollow[]>([]);
+  const [regionFollows, setRegionFollows] = useState<UserRegionFollow[]>([]);
   const [thresholds, setThresholds] = useState<UserThreshold[]>([]);
   const [latestRun, setLatestRun] = useState<WorkerRun | null>(null);
   const [selectedStationId, setSelectedStationId] = useState<number | null>(null);
   const [selectedRegion, setSelectedRegion] = useState(DEFAULT_REGION_KEY);
   const [query, setQuery] = useState("");
   const [loadState, setLoadState] = useState<LoadState>("idle");
+  const [searchState, setSearchState] = useState<LoadState>("idle");
+  const [searchResults, setSearchResults] = useState<StationSearchResult[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [searchMessage, setSearchMessage] = useState<string | null>(null);
   const [savingPollutant, setSavingPollutant] = useState<string | null>(null);
+  const [importingStationId, setImportingStationId] = useState<number | null>(null);
+  const [savingRegionKey, setSavingRegionKey] = useState<string | null>(null);
 
   const supabase = useMemo<SupabaseClient>(() => {
     return createAirGuardClient(() => getToken());
@@ -110,16 +179,53 @@ export default function Dashboard() {
     return new Set(follows.map((follow) => follow.station_id));
   }, [follows]);
 
+  const followedRegionKeys = useMemo(() => {
+    return new Set(regionFollows.map((follow) => follow.region_key));
+  }, [regionFollows]);
+
+  const followedRegions = useMemo(() => {
+    return regionFollows
+      .filter(isVisibleRegionFollow)
+      .map(regionFromFollow)
+      .sort((a, b) => {
+        if (a.key === DEFAULT_REGION_KEY) return -1;
+        if (b.key === DEFAULT_REGION_KEY) return 1;
+        return a.shortLabel.localeCompare(b.shortLabel);
+      });
+  }, [regionFollows]);
+
   const readingsByStation = useMemo(() => groupReadings(readings), [readings]);
   const activeRegion = getRegionConfig(selectedRegion);
+  const normalizedQuery = query.trim();
+  const isSearchMode = normalizedQuery.length >= 2;
+  const currentSearchRegionKey = searchRegionKey(normalizedQuery);
+  const currentSearchRegionLabel = titleCaseSearch(normalizedQuery);
 
   const regionStations = useMemo(() => {
     return stations.filter((station) => station.airguard_region === selectedRegion);
   }, [selectedRegion, stations]);
 
+  const followedStations = useMemo(() => {
+    return stations.filter((station) => followedStationIds.has(station.openaq_location_id));
+  }, [followedStationIds, stations]);
+
+  const mapStations = useMemo(() => {
+    const stationMap = new Map<number, Station>();
+
+    for (const station of regionStations) {
+      stationMap.set(station.openaq_location_id, station);
+    }
+
+    for (const station of followedStations) {
+      stationMap.set(station.openaq_location_id, station);
+    }
+
+    return Array.from(stationMap.values());
+  }, [followedStations, regionStations]);
+
   const filteredStations = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
-    const sorted = sortStationsByReading(regionStations, readingsByStation);
+    const sorted = sortStationsByReading(mapStations, readingsByStation);
 
     if (!normalizedQuery) return sorted;
 
@@ -130,23 +236,63 @@ export default function Dashboard() {
         .toLowerCase()
         .includes(normalizedQuery);
     });
-  }, [query, readingsByStation, regionStations]);
+  }, [query, mapStations, readingsByStation]);
 
-  const followedStations = useMemo(() => {
-    return stations.filter((station) => followedStationIds.has(station.openaq_location_id));
-  }, [followedStationIds, stations]);
+  const visibleMapStations = useMemo(() => {
+    return filteredStations.filter((station) => {
+      return Boolean(getPrimaryReading(readingsByStation.get(station.openaq_location_id) || []));
+    });
+  }, [filteredStations, readingsByStation]);
+
+  const searchStations = useMemo(() => {
+    return searchResults.map((result) => result.station);
+  }, [searchResults]);
+
+  const searchReadingsByStation = useMemo(() => {
+    return groupReadings(searchResults.map((result) => result.reading));
+  }, [searchResults]);
+
+  const activeMapStations = isSearchMode ? searchStations : visibleMapStations;
+  const activeReadingsByStation = isSearchMode
+    ? searchReadingsByStation
+    : readingsByStation;
+  const searchCenter = averageCenter(searchStations);
+  const mapCenter = isSearchMode && searchCenter ? searchCenter : activeRegion.center;
+  const mapZoom = isSearchMode && searchStations.length > 0 ? 10 : activeRegion.zoom;
+  const canFollowCurrentSearch =
+    isSearchMode &&
+    searchState === "ready" &&
+    searchStations.length > 0 &&
+    Boolean(searchCenter) &&
+    Boolean(currentSearchRegionKey);
+  const currentSearchRegionFollowed =
+    canFollowCurrentSearch && followedRegionKeys.has(currentSearchRegionKey);
+  const mapKey = isSearchMode
+    ? `search-${normalizedQuery.toLowerCase()}-${searchStations
+        .map((station) => station.openaq_location_id)
+        .join("-")}`
+    : `region-${selectedRegion}`;
 
   const selectedStation = useMemo(() => {
     return (
       stations.find((station) => station.openaq_location_id === selectedStationId) ||
-      filteredStations[0] ||
+      searchStations.find((station) => station.openaq_location_id === selectedStationId) ||
+      activeMapStations[0] ||
       null
     );
-  }, [filteredStations, selectedStationId, stations]);
+  }, [activeMapStations, searchStations, selectedStationId, stations]);
 
   const selectedReadings = selectedStation
-    ? readingsByStation.get(selectedStation.openaq_location_id) || []
+    ? activeReadingsByStation.get(selectedStation.openaq_location_id) ||
+      readingsByStation.get(selectedStation.openaq_location_id) ||
+      []
     : [];
+  const selectedSearchResult = selectedStation
+    ? searchResults.find(
+        (result) =>
+          result.station.openaq_location_id === selectedStation.openaq_location_id,
+      ) || null
+    : null;
   const alertCount = followedStations.filter((station) => {
     const primary = getPrimaryReading(readingsByStation.get(station.openaq_location_id) || []);
     return isOverThreshold(primary, thresholds);
@@ -163,6 +309,7 @@ export default function Dashboard() {
       readingsResult,
       followsResult,
       thresholdsResult,
+      regionFollowsResult,
       regionPreferenceResult,
       runsResult,
     ] = await Promise.all([
@@ -185,6 +332,10 @@ export default function Dashboard() {
         .select("*")
         .eq("clerk_user_id", user.id),
       supabase
+        .from("user_region_follows")
+        .select("*")
+        .eq("clerk_user_id", user.id),
+      supabase
         .from("user_region_preferences")
         .select("*")
         .eq("clerk_user_id", user.id)
@@ -201,6 +352,7 @@ export default function Dashboard() {
       readingsResult.error ||
       followsResult.error ||
       thresholdsResult.error ||
+      regionFollowsResult.error ||
       regionPreferenceResult.error ||
       runsResult.error;
 
@@ -214,6 +366,36 @@ export default function Dashboard() {
     setReadings((readingsResult.data || []) as StationReading[]);
     setFollows((followsResult.data || []) as UserStationFollow[]);
     setThresholds((thresholdsResult.data || []) as UserThreshold[]);
+    let nextRegionFollows = (
+      (regionFollowsResult.data || []) as UserRegionFollow[]
+    ).filter(isVisibleRegionFollow);
+    if (nextRegionFollows.length === 0) {
+      const defaultRegion = getRegionConfig(DEFAULT_REGION_KEY);
+      const { data, error } = await supabase
+        .from("user_region_follows")
+        .upsert(
+          {
+            clerk_user_id: user.id,
+            region_key: defaultRegion.key,
+            label: defaultRegion.shortLabel,
+            center_lat: defaultRegion.center[0],
+            center_lng: defaultRegion.center[1],
+            zoom: defaultRegion.zoom,
+          },
+          { onConflict: "clerk_user_id,region_key" },
+        )
+        .select("*")
+        .single();
+
+      if (error) {
+        setLoadState("ready");
+        setErrorMessage(getConnectionMessage(error.message));
+        return;
+      }
+
+      nextRegionFollows = [data as UserRegionFollow];
+    }
+    setRegionFollows(nextRegionFollows);
     const preference = regionPreferenceResult.data as
       | UserRegionPreference
       | null;
@@ -231,6 +413,66 @@ export default function Dashboard() {
 
     return () => window.clearTimeout(timeout);
   }, [loadDashboard]);
+
+  useEffect(() => {
+    if (!user) return;
+
+    const normalizedQuery = query.trim();
+
+    if (normalizedQuery.length < 2) {
+      const resetTimeout = window.setTimeout(() => {
+        setSearchState("idle");
+        setSearchResults([]);
+        setSearchMessage(null);
+        setSelectedRegion((current) =>
+          current.startsWith("search:") ? DEFAULT_REGION_KEY : current,
+        );
+      }, 0);
+
+      return () => window.clearTimeout(resetTimeout);
+    }
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(async () => {
+      setSearchState("loading");
+      setSearchResults([]);
+      setSearchMessage(null);
+      setSelectedStationId(null);
+
+      try {
+        const response = await fetch(
+          `/api/stations/search?q=${encodeURIComponent(normalizedQuery)}`,
+          {
+            signal: controller.signal,
+          },
+        );
+        const payload = (await response.json()) as {
+          results?: StationSearchResult[];
+          error?: string;
+        };
+
+        if (!response.ok) {
+          throw new Error(payload.error || "Station search failed.");
+        }
+
+        setSearchResults(payload.results || []);
+        setSearchState("ready");
+      } catch (error) {
+        if (controller.signal.aborted) return;
+
+        setSearchState("error");
+        setSearchResults([]);
+        setSearchMessage(
+          error instanceof Error ? error.message : "Station search failed.",
+        );
+      }
+    }, 400);
+
+    return () => {
+      controller.abort();
+      window.clearTimeout(timeout);
+    };
+  }, [query, user]);
 
   useEffect(() => {
     const channel = supabase
@@ -287,25 +529,39 @@ export default function Dashboard() {
     };
   }, [supabase]);
 
-  async function toggleFollow(stationId: number) {
-    if (!user) return;
+  function mergeStation(station: Station) {
+    setStations((current) => {
+      const withoutStation = current.filter(
+        (item) => item.openaq_location_id !== station.openaq_location_id,
+      );
+      return [station, ...withoutStation];
+    });
+  }
 
-    if (followedStationIds.has(stationId)) {
-      const { error } = await supabase
-        .from("user_station_follows")
-        .delete()
-        .eq("clerk_user_id", user.id)
-        .eq("station_id", stationId);
+  function mergeReadings(nextReadings: StationReading[]) {
+    setReadings((current) => {
+      const next = [...current];
 
-      if (error) {
-        setErrorMessage(getConnectionMessage(error.message));
-        return;
+      for (const reading of nextReadings) {
+        const index = next.findIndex(
+          (item) =>
+            item.station_id === reading.station_id &&
+            item.pollutant === reading.pollutant,
+        );
+
+        if (index >= 0) {
+          next[index] = reading;
+        } else {
+          next.unshift(reading);
+        }
       }
 
-      setErrorMessage(null);
-      setFollows((current) => current.filter((follow) => follow.station_id !== stationId));
-      return;
-    }
+      return next;
+    });
+  }
+
+  async function followStation(stationId: number) {
+    if (!user || followedStationIds.has(stationId)) return;
 
     const { data, error } = await supabase
       .from("user_station_follows")
@@ -318,11 +574,84 @@ export default function Dashboard() {
 
     if (error) {
       setErrorMessage(getConnectionMessage(error.message));
-      return;
+      throw error;
     }
 
     setErrorMessage(null);
     setFollows((current) => [data as UserStationFollow, ...current]);
+  }
+
+  async function unfollowStation(stationId: number) {
+    if (!user) return;
+
+    const { error } = await supabase
+      .from("user_station_follows")
+      .delete()
+      .eq("clerk_user_id", user.id)
+      .eq("station_id", stationId);
+
+    if (error) {
+      setErrorMessage(getConnectionMessage(error.message));
+      return;
+    }
+
+    setErrorMessage(null);
+    setFollows((current) => current.filter((follow) => follow.station_id !== stationId));
+  }
+
+  async function toggleFollow(stationId: number) {
+    if (followedStationIds.has(stationId)) {
+      await unfollowStation(stationId);
+      return;
+    }
+
+    await followStation(stationId);
+  }
+
+  async function followSearchResult(result: StationSearchResult) {
+    const stationId = result.station.openaq_location_id;
+
+    try {
+      setImportingStationId(stationId);
+      setSearchMessage(null);
+
+      const knownStation = stations.some(
+        (station) => station.openaq_location_id === stationId,
+      );
+
+      if (!knownStation || result.source === "openaq") {
+        const response = await fetch("/api/stations/import", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ locationId: stationId }),
+        });
+        const payload = (await response.json()) as {
+          station?: Station;
+          readings?: StationReading[];
+          error?: string;
+        };
+
+        if (!response.ok || !payload.station) {
+          throw new Error(payload.error || "Station import failed.");
+        }
+
+        mergeStation(payload.station);
+        mergeReadings(payload.readings || []);
+      }
+
+      await followStation(stationId);
+      setSelectedStationId(stationId);
+    } catch (error) {
+      setSearchMessage(
+        error instanceof Error
+          ? error.message
+          : "Station could not be followed.",
+      );
+    } finally {
+      setImportingStationId(null);
+    }
   }
 
   async function saveThreshold(pollutant: string, value: number) {
@@ -383,6 +712,111 @@ export default function Dashboard() {
     setErrorMessage(null);
   }
 
+  async function saveRegionFollow(region: AirGuardRegion) {
+    if (!user || followedRegionKeys.has(region.key)) return;
+
+    setSavingRegionKey(region.key);
+
+    const { data, error } = await supabase
+      .from("user_region_follows")
+      .upsert(
+        {
+          clerk_user_id: user.id,
+          region_key: region.key,
+          label: region.shortLabel,
+          center_lat: region.center[0],
+          center_lng: region.center[1],
+          zoom: region.zoom,
+        },
+        { onConflict: "clerk_user_id,region_key" },
+      )
+      .select("*")
+      .single();
+
+    setSavingRegionKey(null);
+
+    if (error) {
+      setErrorMessage(getConnectionMessage(error.message));
+      return;
+    }
+
+    setErrorMessage(null);
+    setRegionFollows((current) => {
+      if (current.some((follow) => follow.region_key === region.key)) {
+        return current;
+      }
+
+      return [data as UserRegionFollow, ...current];
+    });
+  }
+
+  async function unfollowRegion(regionKey: string) {
+    if (!user) return;
+
+    setSavingRegionKey(regionKey);
+
+    const { error } = await supabase
+      .from("user_region_follows")
+      .delete()
+      .eq("clerk_user_id", user.id)
+      .eq("region_key", regionKey);
+
+    setSavingRegionKey(null);
+
+    if (error) {
+      setErrorMessage(getConnectionMessage(error.message));
+      return;
+    }
+
+    setErrorMessage(null);
+    setRegionFollows((current) =>
+      current.filter((follow) => follow.region_key !== regionKey),
+    );
+  }
+
+  async function toggleRegionFollow(region: AirGuardRegion) {
+    if (followedRegionKeys.has(region.key)) {
+      await unfollowRegion(region.key);
+      return;
+    }
+
+    await saveRegionFollow(region);
+  }
+
+  function selectFollowedRegion(region: AirGuardRegion) {
+    setSelectedStationId(null);
+
+    if (region.key.startsWith("search:")) {
+      setSelectedRegion(region.key);
+      setQuery(region.shortLabel);
+      return;
+    }
+
+    void changeRegion(region.key);
+  }
+
+  async function toggleCurrentSearchRegionFollow() {
+    if (!canFollowCurrentSearch || !searchCenter) return;
+
+    const region: AirGuardRegion = {
+      key: currentSearchRegionKey,
+      label: currentSearchRegionLabel,
+      shortLabel: currentSearchRegionLabel,
+      center: searchCenter,
+      zoom: mapZoom,
+    };
+
+    await toggleRegionFollow(region);
+  }
+
+  function isFollowedRegionSelected(region: AirGuardRegion) {
+    if (region.key.startsWith("search:")) {
+      return isSearchMode && currentSearchRegionKey === region.key;
+    }
+
+    return selectedRegion === region.key && !isSearchMode;
+  }
+
   return (
     <main className="min-h-screen overflow-hidden bg-[#020205] text-white">
       <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_50%_18%,rgba(206,68,255,0.22),transparent_28%),radial-gradient(circle_at_84%_52%,rgba(34,211,238,0.10),transparent_28%),linear-gradient(180deg,rgba(255,255,255,0.04),transparent_38%)]" />
@@ -398,8 +832,8 @@ export default function Dashboard() {
               <div className="text-[11px] font-semibold uppercase tracking-[0.5em] text-white/45">
                 AirGuard
               </div>
-              <h1 className="text-xl font-light tracking-[0.24em] text-white sm:text-2xl">
-                AIR QUALITY MONITOR
+              <h1 className="text-2xl font-medium tracking-wide text-white sm:text-[1.7rem]">
+                Air Quality Monitor
               </h1>
             </div>
           </div>
@@ -429,8 +863,12 @@ export default function Dashboard() {
           />
           <MetricCard
             icon={<MapPin className="h-4 w-4" />}
-            label={`${activeRegion.shortLabel} Stations`}
-            value={regionStations.length.toString()}
+            label={isSearchMode ? "Search Stations" : `${activeRegion.shortLabel} Stations`}
+            value={
+              isSearchMode
+                ? searchResults.length.toString()
+                : regionStations.length.toString()
+            }
           />
           <MetricCard
             icon={<BellRing className="h-4 w-4" />}
@@ -478,23 +916,39 @@ export default function Dashboard() {
               )}
             </Panel>
 
-            <Panel title="Locked Region" icon={<MapPin className="h-4 w-4" />}>
-              <div className="grid grid-cols-2 gap-2">
-                {AIRGUARD_REGIONS.map((region) => (
-                  <button
-                    key={region.key}
-                    type="button"
-                    onClick={() => changeRegion(region.key)}
-                    className={`h-10 rounded-full border px-3 text-xs font-semibold uppercase tracking-[0.16em] transition ${
-                      selectedRegion === region.key
-                        ? "border-fuchsia-300/50 bg-fuchsia-300/15 text-fuchsia-100"
-                        : "border-white/10 bg-black/20 text-white/48 hover:border-white/25 hover:text-white"
-                    }`}
-                  >
-                    {region.shortLabel}
-                  </button>
-                ))}
-              </div>
+            <Panel title="Followed Region" icon={<MapPin className="h-4 w-4" />}>
+              {loadState === "loading" ? (
+                <LoadingLine label="Loading followed regions" />
+              ) : followedRegions.length === 0 ? (
+                <div className="space-y-3">
+                  <EmptyState
+                    title="No followed regions"
+                    body="Follow Chicago to keep the default monitoring region pinned here."
+                  />
+                  <RegionRow
+                    region={getRegionConfig(DEFAULT_REGION_KEY)}
+                    followed={false}
+                    selected={selectedRegion === DEFAULT_REGION_KEY && !isSearchMode}
+                    saving={savingRegionKey === DEFAULT_REGION_KEY}
+                    onSelect={() => void changeRegion(DEFAULT_REGION_KEY)}
+                    onToggleFollow={() => void saveRegionFollow(getRegionConfig(DEFAULT_REGION_KEY))}
+                  />
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {followedRegions.map((region) => (
+                    <RegionRow
+                      key={region.key}
+                      region={region}
+                      followed={followedRegionKeys.has(region.key)}
+                      selected={isFollowedRegionSelected(region)}
+                      saving={savingRegionKey === region.key}
+                      onSelect={() => selectFollowedRegion(region)}
+                      onToggleFollow={() => void toggleRegionFollow(region)}
+                    />
+                  ))}
+                </div>
+              )}
             </Panel>
 
             <Panel title="Thresholds" icon={<Settings2 className="h-4 w-4" />}>
@@ -518,28 +972,37 @@ export default function Dashboard() {
 
           <section className="order-1 min-h-[520px] overflow-hidden rounded-[30px] border border-white/10 bg-black/30 p-2 shadow-[0_0_120px_rgba(97,24,179,0.24)] xl:order-2">
             <div className="relative h-full">
-              {stations.length === 0 && loadState !== "loading" ? (
+              {activeMapStations.length === 0 && loadState !== "loading" ? (
                 <div className="flex h-full min-h-[520px] items-center justify-center rounded-[24px] border border-white/10 bg-black/40 text-center">
                   <EmptyState
-                    title="No station data yet"
-                    body="Run the worker once to seed OpenAQ stations and live readings into Supabase."
+                    title={
+                      isSearchMode
+                        ? "No fresh PM2.5 search points"
+                        : "No fresh PM2.5 map points"
+                    }
+                    body={
+                      isSearchMode
+                        ? "Try a different US city or broaden the spelling."
+                        : "Search a US city and follow a fresh PM2.5 station, or wait for the worker to refresh this region."
+                    }
                   />
                 </div>
               ) : (
                 <AirQualityMap
-                  key={selectedRegion}
-                  stations={filteredStations}
-                  readingsByStation={readingsByStation}
+                  key={mapKey}
+                  stations={activeMapStations}
+                  readingsByStation={activeReadingsByStation}
                   followedStationIds={followedStationIds}
+                  thresholds={thresholds}
                   selectedStationId={selectedStationId}
-                  center={activeRegion.center}
-                  zoom={activeRegion.zoom}
+                  center={mapCenter}
+                  zoom={mapZoom}
                   onSelectStation={setSelectedStationId}
                 />
               )}
 
               <div className="pointer-events-none absolute left-4 top-4 rounded-full border border-white/10 bg-black/60 px-4 py-2 text-xs uppercase tracking-[0.22em] text-white/60 backdrop-blur">
-                {activeRegion.shortLabel} Discovery
+                {isSearchMode ? `${normalizedQuery} Search` : `${activeRegion.shortLabel} Discovery`}
               </div>
             </div>
           </section>
@@ -551,11 +1014,54 @@ export default function Dashboard() {
                 <input
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
-                  placeholder="Search station, city, provider"
+                  placeholder="Search any US city"
                   className="h-11 w-full rounded-full border border-white/10 bg-white/[0.06] pl-10 pr-4 text-sm text-white outline-none transition placeholder:text-white/30 focus:border-fuchsia-300/50"
                 />
               </div>
 
+              <div className="mt-3 space-y-2">
+                {query.trim().length < 2 ? (
+                  <p className="text-xs leading-5 text-white/35">
+                    Search any US city to find fresh PM2.5 stations.
+                  </p>
+                ) : searchState === "loading" ? (
+                  <LoadingLine label="Searching PM2.5 stations" />
+                ) : searchMessage ? (
+                  <div className="rounded-2xl border border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs leading-5 text-amber-100">
+                    {searchMessage}
+                  </div>
+                ) : searchResults.length === 0 && searchState === "ready" ? (
+                  <p className="text-xs leading-5 text-white/35">
+                    No fresh PM2.5 stations found within 25 km.
+                  </p>
+                ) : (
+                  <div className="rounded-2xl border border-cyan-200/15 bg-cyan-300/10 px-3 py-2 text-xs leading-5 text-cyan-100">
+                    {searchResults.length} fresh PM2.5 stations on map
+                  </div>
+                )}
+
+                {canFollowCurrentSearch ? (
+                  <button
+                    type="button"
+                    onClick={() => void toggleCurrentSearchRegionFollow()}
+                    disabled={savingRegionKey === currentSearchRegionKey}
+                    className={`flex h-11 w-full items-center justify-center gap-2 rounded-full border text-sm font-semibold uppercase tracking-[0.18em] transition disabled:cursor-not-allowed disabled:opacity-60 ${
+                      currentSearchRegionFollowed
+                        ? "border-fuchsia-300/35 bg-fuchsia-300/15 text-fuchsia-100"
+                        : "border-white/10 bg-white/[0.04] text-white/70 hover:border-fuchsia-300/40 hover:text-fuchsia-100"
+                    }`}
+                  >
+                    {savingRegionKey === currentSearchRegionKey ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Heart className={`h-4 w-4 ${currentSearchRegionFollowed ? "fill-current" : ""}`} />
+                    )}
+                    {currentSearchRegionFollowed
+                      ? `Following ${currentSearchRegionLabel}`
+                      : `Follow ${currentSearchRegionLabel}`}
+                  </button>
+                ) : null}
+              </div>
             </Panel>
 
             <Panel title="Selected Station" icon={<MapPin className="h-4 w-4" />}>
@@ -574,11 +1080,27 @@ export default function Dashboard() {
 
                   <button
                     type="button"
-                    onClick={() => toggleFollow(selectedStation.openaq_location_id)}
+                    onClick={() => {
+                      if (
+                        selectedSearchResult &&
+                        !followedStationIds.has(selectedStation.openaq_location_id)
+                      ) {
+                        void followSearchResult(selectedSearchResult);
+                        return;
+                      }
+
+                      void toggleFollow(selectedStation.openaq_location_id);
+                    }}
                     className="flex h-11 w-full items-center justify-center gap-2 rounded-full border border-fuchsia-300/30 bg-fuchsia-300/10 text-sm font-semibold uppercase tracking-[0.2em] text-fuchsia-100 transition hover:bg-fuchsia-300/20"
                   >
-                    <Heart className="h-4 w-4" />
-                    {followedStationIds.has(selectedStation.openaq_location_id)
+                    {importingStationId === selectedStation.openaq_location_id ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Heart className="h-4 w-4" />
+                    )}
+                    {importingStationId === selectedStation.openaq_location_id
+                      ? "Following"
+                      : followedStationIds.has(selectedStation.openaq_location_id)
                       ? "Following"
                       : "Follow Station"}
                   </button>
@@ -684,6 +1206,62 @@ function EmptyState({ title, body }: { title: string; body: string }) {
   );
 }
 
+function RegionRow({
+  region,
+  followed,
+  selected,
+  saving,
+  onSelect,
+  onToggleFollow,
+}: {
+  region: AirGuardRegion;
+  followed: boolean;
+  selected: boolean;
+  saving: boolean;
+  onSelect: () => void;
+  onToggleFollow: () => void;
+}) {
+  return (
+    <div
+      className={`flex min-h-14 items-center gap-2 rounded-2xl border p-2 transition ${
+        selected
+          ? "border-fuchsia-300/40 bg-fuchsia-300/10"
+          : "border-white/10 bg-black/20 hover:border-white/20"
+      }`}
+    >
+      <button
+        type="button"
+        onClick={onSelect}
+        className="min-w-0 flex-1 px-2 py-1 text-left"
+      >
+        <div className="truncate text-sm font-medium text-white">
+          {region.shortLabel}
+        </div>
+        <div className="mt-1 truncate text-xs text-white/38">
+          {selected ? "Viewing" : region.label}
+        </div>
+      </button>
+      <button
+        type="button"
+        aria-label={followed ? `Unfollow ${region.shortLabel}` : `Follow ${region.shortLabel}`}
+        onClick={onToggleFollow}
+        disabled={saving}
+        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition disabled:cursor-not-allowed disabled:opacity-60 ${
+          followed
+            ? "border-fuchsia-300/35 bg-fuchsia-300/15 text-fuchsia-100"
+            : "border-white/10 bg-white/[0.03] text-white/38 hover:border-fuchsia-300/35 hover:text-fuchsia-100"
+        }`}
+      >
+        {saving ? (
+          <Loader2 className="h-4 w-4 animate-spin" />
+        ) : (
+          <Heart className={`h-4 w-4 ${followed ? "fill-current" : ""}`} />
+        )}
+      </button>
+    </div>
+  );
+}
+
 function StationRow({
   station,
   readings,
@@ -785,9 +1363,11 @@ function ThresholdControl({
     <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
       <div className="mb-2 flex items-center justify-between">
         <span className="text-xs font-semibold uppercase tracking-[0.22em] text-white/55">
-          {POLLUTANT_LABELS[pollutant] || pollutant}
+          {pollutant === "pm25"
+            ? `${POLLUTANT_LABELS[pollutant]} AQI`
+            : POLLUTANT_LABELS[pollutant] || pollutant}
         </span>
-        <span className="text-xs text-white/35">Threshold</span>
+        <span className="text-xs text-white/35">Alert score</span>
       </div>
       <div className="flex gap-2">
         <input

@@ -25,30 +25,9 @@ const SUPPORTED_REGIONS = {
     label: "Chicago",
     bbox: "-88.35,41.55,-87.15,42.15",
   },
-  new_york: {
-    label: "New York",
-    bbox: "-74.30,40.45,-73.65,41.05",
-  },
-  los_angeles: {
-    label: "Los Angeles",
-    bbox: "-118.75,33.65,-117.75,34.35",
-  },
-  bay_area: {
-    label: "Bay Area",
-    bbox: "-122.75,37.20,-121.70,38.15",
-  },
-  houston: {
-    label: "Houston",
-    bbox: "-95.90,29.00,-94.90,30.30",
-  },
 };
 
-const DEFAULT_REGION_KEYS = (
-  process.env.OPENAQ_REGION_KEYS || Object.keys(SUPPORTED_REGIONS).join(",")
-)
-  .split(",")
-  .map((region) => region.trim())
-  .filter((region) => region in SUPPORTED_REGIONS);
+const DEFAULT_REGION_KEYS = ["chicago"];
 
 function requiredEnv(name) {
   const value = process.env[name];
@@ -256,6 +235,17 @@ function balancedPollLocations(locationsById) {
   }
 
   const selected = [];
+  const selectedIds = new Set();
+  const followed = Array.from(locationsById.values())
+    .filter((location) => location.isFollowedAirGuard)
+    .sort((a, b) => a.id - b.id);
+
+  for (const location of followed) {
+    if (selected.length >= POLL_LIMIT) break;
+    selected.push(location);
+    selectedIds.add(location.id);
+  }
+
   const regionKeys = DEFAULT_REGION_KEYS.filter((region) => byRegion.has(region));
   const chicagoLimit = Math.min(24, POLL_LIMIT);
   const otherRegionLimit =
@@ -264,16 +254,31 @@ function balancedPollLocations(locationsById) {
       : 0;
 
   const chicago = byRegion.get("chicago") || [];
-  selected.push(...chicago.slice(0, chicagoLimit));
+  for (const location of chicago) {
+    if (selected.length >= POLL_LIMIT || selectedIds.has(location.id)) continue;
+    selected.push(location);
+    selectedIds.add(location.id);
+    if (selected.filter((item) => item.airguardRegion === "chicago").length >= chicagoLimit) {
+      break;
+    }
+  }
 
   for (const regionKey of regionKeys) {
     if (regionKey === "chicago") continue;
     const regionLocations = byRegion.get(regionKey) || [];
-    selected.push(...regionLocations.slice(0, otherRegionLimit));
+    let added = 0;
+
+    for (const location of regionLocations) {
+      if (selected.length >= POLL_LIMIT || selectedIds.has(location.id)) continue;
+      selected.push(location);
+      selectedIds.add(location.id);
+      added += 1;
+
+      if (added >= otherRegionLimit) break;
+    }
   }
 
   if (selected.length < POLL_LIMIT) {
-    const selectedIds = new Set(selected.map((location) => location.id));
     const remaining = Array.from(locationsById.values())
       .filter((location) => !selectedIds.has(location.id))
       .sort((a, b) => a.id - b.id);
@@ -380,7 +385,10 @@ async function getPollLocations() {
   }
 
   for (const known of knownFollowed) {
-    if (locationsById.has(known.openaq_location_id)) {
+    const existing = locationsById.get(known.openaq_location_id);
+    if (existing) {
+      existing.isFollowedAirGuard = true;
+      existing.airguardRegion = existing.airguardRegion || known.airguard_region || "custom";
       continue;
     }
 
@@ -390,6 +398,7 @@ async function getPollLocations() {
         locationsById.set(location.id, {
           ...location,
           airguardRegion: known.airguard_region || "chicago",
+          isFollowedAirGuard: true,
         });
       }
     } catch (error) {

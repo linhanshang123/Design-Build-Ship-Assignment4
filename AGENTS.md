@@ -17,7 +17,7 @@ AirGuard must satisfy the assignment architecture:
 - Supabase Realtime powers live frontend updates.
 - Clerk handles authentication.
 - User personalization is stored in Supabase and protected with RLS through the native Clerk/Supabase third-party auth integration.
-- The dashboard defaults to Chicago and supports a small set of selectable metro regions instead of trying to render the entire United States.
+- The dashboard defaults to Chicago; users can search other US cities, follow searched cities as regions, and follow individual stations without trying to render the entire United States.
 
 ## Design Direction
 
@@ -36,7 +36,7 @@ The map should take inspiration from dense AQI dashboards:
 - Large interactive map as the main surface.
 - Colored circular station markers.
 - AQI or pollutant values inside markers when useful.
-- A region selector for supported metro areas, with Chicago as the default.
+- Chicago as the default monitoring region, with city search for discovering and following regions elsewhere.
 - A compact side panel for selected station details.
 - Favorites, thresholds, and realtime status visible without clutter.
 

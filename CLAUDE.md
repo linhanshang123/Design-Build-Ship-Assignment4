@@ -20,6 +20,8 @@ The system follows the assignment architecture:
 - `stations`: OpenAQ location metadata, coordinates, provider, country, and active status.
 - `station_readings`: latest normalized pollutant readings per station and pollutant, including measured time, estimated AQI, and AQI category.
 - `user_station_follows`: Clerk user IDs mapped to followed stations.
+- `user_region_follows`: Clerk user IDs mapped to followed regions, including Chicago and cities saved from station search.
+- `user_region_preferences`: Clerk user IDs mapped to the currently selected dashboard region.
 - `user_thresholds`: Clerk user IDs mapped to pollutant threshold preferences.
 - `worker_runs`: poll status, timestamps, counts, and error messages.
 
@@ -43,7 +45,7 @@ The worker reads:
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `OPENAQ_API_KEY`
 
-It polls a capped set of supported metro regions, prioritizes Chicago by default, keeps enough stations for each selectable region, upserts station metadata, upserts latest readings, and records each run in `worker_runs`.
+It polls a capped Chicago station set, prioritizes user-followed stations from any searched city, upserts station metadata, upserts latest readings, and records each run in `worker_runs`.
 
 ## Frontend
 
@@ -58,7 +60,7 @@ The homepage is the product experience:
 
 - Signed-out users see a dark AirGuard sign-in screen.
 - Signed-in users see their followed stations, threshold alerts, realtime worker status, station search, selected-station details, and a large map.
-- Users can lock the dashboard to a supported region. Chicago is the default region.
+- Chicago is the default followed region. Users can follow searched cities as regions and follow individual stations from those cities.
 - The map uses AQI-colored circular station markers and updates as Supabase Realtime events arrive.
 
 ## Deployment

@@ -100,3 +100,23 @@ input {
     0 0 0 7px color-mix(in srgb, var(--marker-color) 28%, transparent),
     0 0 48px color-mix(in srgb, var(--marker-color) 70%, transparent);
 }
+
+.airguard-marker-alert {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  z-index: 2;
+  display: flex;
+  height: 15px;
+  width: 15px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  border-radius: 999px;
+  background: #fb7185;
+  color: #16040a;
+  font-size: 10px;
+  font-weight: 900;
+  line-height: 1;
+  box-shadow: 0 0 14px rgba(251, 113, 133, 0.76);
+}

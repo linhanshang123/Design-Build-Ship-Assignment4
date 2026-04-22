@@ -2,6 +2,19 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 
 ## Getting Started
 
+Create `apps/web/.env.local` with the frontend keys and the server-only keys used by the station search/import API routes:
+
+```bash
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=
+CLERK_SECRET_KEY=
+SUPABASE_SERVICE_ROLE_KEY=
+OPENAQ_API_KEY=
+```
+
+Do not prefix `SUPABASE_SERVICE_ROLE_KEY` or `OPENAQ_API_KEY` with `NEXT_PUBLIC_`.
+
 First, run the development server:
 
 ```bash
